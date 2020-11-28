@@ -5,7 +5,7 @@ import math
 import datetime
 import sys
 
-_SHOW_IMAGE = False
+_SHOW_IMAGE = True
 
 
 class HandCodedLaneFollower(object):
@@ -14,6 +14,8 @@ class HandCodedLaneFollower(object):
         logging.info('Creating a HandCodedLaneFollower...')
         self.car = car
         self.curr_steering_angle = 90
+        self.no_lane_state = False
+        self.i = 0
 
     def follow_lane(self, frame):
         # Main entry point of the lane follower
@@ -27,19 +29,35 @@ class HandCodedLaneFollower(object):
     def steer(self, frame, lane_lines):
         logging.debug('steering...')
         if len(lane_lines) == 0:
-            logging.error('No lane lines detected, nothing to do.')
+            logging.error('No lane lines detected, go other way')
+            if self.no_lane_state:
+                # Continue no lane
+                logging.info(f"Continuing angle {self.curr_steering_angle}")
+                return frame
+            #if self.curr_steering_angle >= 90:
+            #   self.curr_steering_angle = 70
+            #else:
+            #   self.curr_steering_angle = 110
+            #self.car.front_wheels.turn(self.curr_steering_angle)
+            logging.info(f"Compensating with angle {self.curr_steering_angle}")
+            self.no_lane_state = True
             return frame
-
-        new_steering_angle = compute_steering_angle(frame, lane_lines)
+        self.no_lane_state = False
+        new_steering_angle = compute_steering_angle(frame, lane_lines, self.curr_steering_angle)
         self.curr_steering_angle = stabilize_steering_angle(self.curr_steering_angle, new_steering_angle, len(lane_lines))
 
         if self.car is not None:
             self.car.front_wheels.turn(self.curr_steering_angle)
+ 
         curr_heading_image = display_heading_line(frame, self.curr_steering_angle)
         show_image("heading", curr_heading_image)
 
+        if len(lane_lines) <= 1:
+            cv2.imwrite(f"screencaps/lost_lane_{self.i}_angle_{self.curr_steering_angle}.png", curr_heading_image)
+            self.i += 1
         return curr_heading_image
 
+j = 0
 
 ############################
 # Frame processing steps
@@ -56,6 +74,10 @@ def detect_lane(frame):
     line_segments = detect_line_segments(cropped_edges)
     line_segment_image = display_lines(frame, line_segments)
     show_image("line segments", line_segment_image)
+    if line_segments is not None and len(line_segments) <= 1:
+        global j
+        cv2.imwrite(f"screencaps/line_segments_{j}.png", line_segment_image)
+        j += 1
 
     lane_lines = average_slope_intercept(frame, line_segments)
     lane_lines_image = display_lines(frame, lane_lines)
@@ -68,7 +90,7 @@ def detect_edges(frame):
     # filter for blue lane lines
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     show_image("hsv", hsv)
-    lower_blue = np.array([30, 40, 0])
+    lower_blue = np.array([90, 40, 40])
     upper_blue = np.array([150, 255, 255])
     mask = cv2.inRange(hsv, lower_blue, upper_blue)
     show_image("blue mask", mask)
@@ -108,8 +130,8 @@ def region_of_interest(canny):
     # only focus bottom half of the screen
 
     polygon = np.array([[
-        (0, height * 1 / 2),
-        (width, height * 1 / 2),
+        (0, height * 1/2),
+        (width, height * 1/2),
         (width, height),
         (0, height),
     ]], np.int32)
@@ -124,9 +146,9 @@ def detect_line_segments(cropped_edges):
     # tuning min_threshold, minLineLength, maxLineGap is a trial and error process by hand
     rho = 1  # precision in pixel, i.e. 1 pixel
     angle = np.pi / 180  # degree in radian, i.e. 1 degree
-    min_threshold = 10  # minimal of votes
+    min_threshold = 8  # minimal of votes
     line_segments = cv2.HoughLinesP(cropped_edges, rho, angle, min_threshold, np.array([]), minLineLength=8,
-                                    maxLineGap=4)
+                                    maxLineGap=3)
 
     if line_segments is not None:
         for line_segment in line_segments:
@@ -172,18 +194,22 @@ def average_slope_intercept(frame, line_segments):
 
     left_fit_average = np.average(left_fit, axis=0)
     if len(left_fit) > 0:
-        lane_lines.append(make_points(frame, left_fit_average))
-
+        try:
+            lane_lines.append(make_points(frame, left_fit_average))
+        except Exception:
+            pass
     right_fit_average = np.average(right_fit, axis=0)
     if len(right_fit) > 0:
-        lane_lines.append(make_points(frame, right_fit_average))
-
+        try:
+            lane_lines.append(make_points(frame, right_fit_average))
+        except Exception:
+            pass
     logging.debug('lane lines: %s' % lane_lines)  # [[[316, 720, 484, 432]], [[1009, 720, 718, 432]]]
 
     return lane_lines
 
 
-def compute_steering_angle(frame, lane_lines):
+def compute_steering_angle(frame, lane_lines, cur_angle):
     """ Find the steering angle based on lane line coordinate
         We assume that camera is calibrated to point to dead center
     """
@@ -192,14 +218,21 @@ def compute_steering_angle(frame, lane_lines):
         return -90
 
     height, width, _ = frame.shape
+
+
     if len(lane_lines) == 1:
         logging.debug('Only detected one lane line, just follow it. %s' % lane_lines[0])
         x1, _, x2, _ = lane_lines[0][0]
         x_offset = x2 - x1
+        # Turn other way to find both lanes again
+        #if cur_angle >= 90:
+        #    return 60
+        #else:
+        #    return 120    
     else:
         _, _, left_x2, _ = lane_lines[0][0]
         _, _, right_x2, _ = lane_lines[1][0]
-        camera_mid_offset_percent = 0.02 # 0.0 means car pointing to center, -0.03: car is centered to left, +0.03 means car pointing to right
+        camera_mid_offset_percent = 0.0 # 0.0 means car pointing to center, -0.03: car is centered to left, +0.03 means car pointing to right
         mid = int(width / 2 * (1 + camera_mid_offset_percent))
         x_offset = (left_x2 + right_x2) / 2 - mid
 
@@ -209,12 +242,11 @@ def compute_steering_angle(frame, lane_lines):
     angle_to_mid_radian = math.atan(x_offset / y_offset)  # angle (in radian) to center vertical line
     angle_to_mid_deg = int(angle_to_mid_radian * 180.0 / math.pi)  # angle (in degrees) to center vertical line
     steering_angle = angle_to_mid_deg + 90  # this is the steering angle needed by picar front wheel
-
     logging.debug('new steering angle: %s' % steering_angle)
     return steering_angle
 
 
-def stabilize_steering_angle(curr_steering_angle, new_steering_angle, num_of_lane_lines, max_angle_deviation_two_lines=5, max_angle_deviation_one_lane=1):
+def stabilize_steering_angle(curr_steering_angle, new_steering_angle, num_of_lane_lines, max_angle_deviation_two_lines=5, max_angle_deviation_one_lane=2):
     """
     Using last steering angle to stabilize the steering angle
     This can be improved to use last N angles, etc

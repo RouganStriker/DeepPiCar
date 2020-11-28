@@ -7,8 +7,8 @@ def main():
     logging.info('Starting DeepPiCar, system info: ' + sys.version)
     
     with DeepPiCar() as car:
-        car.drive(40)
+        car.drive(0)
     
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
     main()

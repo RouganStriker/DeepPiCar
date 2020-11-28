@@ -2,9 +2,13 @@ import logging
 import picar
 import cv2
 import datetime
-from hand_coded_lane_follower import HandCodedLaneFollower
-from objects_on_road_processor import ObjectsOnRoadProcessor
-from time import sleep
+from threading import Thread
+from queue import Queue
+
+import imutils
+from imutils.video import WebcamVideoStream
+from imutils.video import FPS
+from pynput.keyboard import Key, Listener
 
 _SHOW_IMAGE = True
 
@@ -22,17 +26,10 @@ class DeepPiCar(object):
         picar.setup()
 
         logging.debug('Set up camera')
-        self.camera = cv2.VideoCapture(-1)
-        self.camera.set(3, self.__SCREEN_WIDTH)
-        self.camera.set(4, self.__SCREEN_HEIGHT)
-
-        #self.pan_servo = picar.Servo.Servo(1)
-        #self.pan_servo.offset = -250  # calibrate servo to center
-        #self.pan_servo.write(90)
-
-        #self.tilt_servo = picar.Servo.Servo(2)
-        #self.tilt_servo.offset = -210  # calibrate servo to center
-        #self.tilt_servo.write(90)
+        #self.camera = cv2.VideoCapture(-1)
+        #self.camera.set(3, self.__SCREEN_WIDTH)
+        #self.camera.set(4, self.__SCREEN_HEIGHT)
+        self.camera = WebcamVideoStream(src=0).start()
 
         logging.debug('Set up back wheels')
         self.back_wheels = picar.back_wheels.Back_Wheels()
@@ -41,19 +38,24 @@ class DeepPiCar(object):
         logging.debug('Set up front wheels')
         self.front_wheels = picar.front_wheels.Front_Wheels()
         self.front_wheels.turning_offset = -25  # calibrate servo to center
+        self.angle = 90
         self.front_wheels.turn(90)  # Steering Range is 45 (left) - 90 (center) - 135 (right)
-
-        self.lane_follower = HandCodedLaneFollower(self)
-        self.traffic_sign_processor = ObjectsOnRoadProcessor(self)
-        # lane_follower = DeepLearningLaneFollower()
-
         self.fourcc = cv2.VideoWriter_fourcc(*'XVID')
         datestr = datetime.datetime.now().strftime("%y%m%d_%H%M%S")
         self.video_orig = self.create_video_recorder('../data/tmp/car_video%s.avi' % datestr)
-        self.video_lane = self.create_video_recorder('../data/tmp/car_video_lane%s.avi' % datestr)
-        self.video_objs = self.create_video_recorder('../data/tmp/car_video_objs%s.avi' % datestr)
+        
+        self.fps = FPS().start()
+        self.font = font = cv2.FONT_HERSHEY_SIMPLEX
 
+        self.listener = Listener(on_press=self.on_keypress)
+        #self.queue = Queue()
         logging.info('Created a DeepPiCar')
+        #self.readThread = Thread(target=self.read_frame)
+     
+    def read_frame(self):
+        while self.camera.isOpened():
+            _, frame = self.camera.read()     
+            self.queue.put(frame)
 
     def create_video_recorder(self, path):
         return cv2.VideoWriter(path, self.fourcc, 20.0, (self.__SCREEN_WIDTH, self.__SCREEN_HEIGHT))
@@ -75,10 +77,11 @@ class DeepPiCar(object):
         logging.info('Stopping the car, resetting hardware.')
         self.back_wheels.speed = 0
         self.front_wheels.turn(90)
-        self.camera.release()
+        #self.camera.release()
+        self.fps.stop()
+        self.camera.stop()
         self.video_orig.release()
-        self.video_lane.release()
-        self.video_objs.release()
+        self.listener.stop()
         cv2.destroyAllWindows()
 
     def drive(self, speed=__INITIAL_SPEED):
@@ -89,39 +92,37 @@ class DeepPiCar(object):
         """
 
         logging.info('Starting to drive at speed %s...' % speed)
-        #self.back_wheels.speed = speed
+        self.back_wheels.speed = speed
+        self.listener.start()
+       
+        while True:
+            frame = self.camera.read()
+            frame = imutils.resize(frame, width=400)
+            frame = imutils.rotate(frame, angle=180)
 
-        i = 0
-        while self.camera.isOpened():
-            #self.back_wheels.speed = speed
-            _, image_lane = self.camera.read()
-            image_objs = image_lane.copy()
-            i += 1
-            self.video_orig.write(image_lane)
+            current_fps = self.fps._numFrames /  (datetime.datetime.now() - self.fps._start).total_seconds()
+            cv2.putText(frame, f'{int(current_fps)}FPS', (0, 25), self.font, 0.75, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.imshow("Frame", frame)
 
-            #image_objs = self.process_objects_on_road(image_objs)
-            #self.video_objs.write(image_objs)
-            #show_image('Detected Objects', image_objs)
-
-            image_lane = self.follow_lane(image_lane)
-            self.video_lane.write(image_lane)
-            show_image('Lane Lines', image_lane)
+            self.fps.update()
+           
+          
+            #self.video_orig.write(image_lane)
+            #show_image("Main", image_lane)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 self.cleanup()
                 break 
 
-            self.back_wheels.speed = speed
-#            sleep(0.5)
- #           self.back_wheels.speed = 0
-
-    def process_objects_on_road(self, image):
-        image = self.traffic_sign_processor.process_objects_on_road(image)
-        return image
-
-    def follow_lane(self, image):
-        image = self.lane_follower.follow_lane(image)
-        return image
+    def on_keypress(self, key):
+        if key == Key.left and self.angle > 45:
+            self.angle -= 2
+        elif key == Key.right and self.angle < 135:
+            self.angle += 2
+        else:
+            return
+        self.front_wheels.turn(self.angle)
+        logging.info(f"Turning to {self.angle}")
 
 
 ############################
@@ -134,7 +135,7 @@ def show_image(title, frame, show=_SHOW_IMAGE):
 
 def main():
     with DeepPiCar() as car:
-        car.drive(0)
+        car.drive(30)
 
 
 if __name__ == '__main__':
